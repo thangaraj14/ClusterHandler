@@ -3,7 +3,7 @@ package model;
 import java.util.HashMap;
 
 /**
- *
+ * It has the cluster details
  */
 public class HostDetails {
 

@@ -21,7 +21,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- *
+ * A cluster has multiple hosts and each host has multiple files stored in it.it handles the cluster when its down
  */
 public class ClusterHandler {
 
@@ -33,70 +33,40 @@ public class ClusterHandler {
 
     public ClusterHandler(int size) {
         this.size = size;
-        hostDetailsList = new ArrayList<>();
+        hostDetailsList = Collections.synchronizedList(new ArrayList<>());
         mappingTable = new ConcurrentHashMap<>();
-        lock = new ReentrantReadWriteLock(true);
+        lock = new ReentrantReadWriteLock(false);
     }
 
     public static void main(String[] args) {
 
         ClusterHandler clusterAvailability = new ClusterHandler(4);
         clusterAvailability.preprocessAndLoadCache();
-        String[] arr = { "host2", "host3" };
 
-        ExecutorService executorService = Executors.newFixedThreadPool(5);
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
 
-        Callable callable = () -> {
-            String[] params = { "host2", "host3" };
+        Callable<List<Result>> callable = () -> {
+            String[] params = { "host2" };
             return clusterAvailability.hostDown(params);
         };
 
-        Callable callable1 = () -> {
-            String[] params = { "host2", "host1" };
-            return clusterAvailability.hostDown(params);
-        };
+        Callable<List<HostDetails>> callableAvailableClusters = () -> clusterAvailability.getAvailableClusters();
 
-        Future future = executorService.submit(callable);
-        Future submit = executorService.submit(callable1);
-        Object o = null;
+        Future<List<Result>> future = executorService.submit(callable);
+        Future<List<HostDetails>> availableClusters = executorService.submit(callableAvailableClusters);
         try {
-            List<Result> list = (List<Result>) future.get();
-            System.out.println("******---------******");
-            System.out.println("Deleted cluster details: ");
-            if (list == null) {
-                System.out.println("The given cluster doesn't exist");
-            } else if (list.isEmpty()) {
-                System.out.println("Max of 2 hosts can go down at a time.");
-            } else {
-                list.forEach(System.out::println);
-            }
+            List<Result> list = future.get();
+            System.out.println("After removing the cluster");
+            list.forEach(System.out::println);
 
-            List<Result> list1 = (List<Result>) submit.get();
-            System.out.println("******---------******");
-            System.out.println("Deleted cluster details: ");
-            if (list1 == null) {
-                System.out.println("The given cluster doesn't exist");
-            } else if (list1.isEmpty()) {
-                System.out.println("Max of 2 hosts can go down at a time.");
-            } else {
-                list1.forEach(System.out::println);
-            }
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        } catch (ExecutionException e) {
+            List<HostDetails> hostDetails = availableClusters.get();
+            System.out.println("Available clusters :" + hostDetails.size());
+            hostDetails.forEach(System.out::println);
+
+        } catch (InterruptedException | ExecutionException e) {
             e.printStackTrace();
         }
         executorService.shutdown();
-
-/*                List<Result> list = clusterAvailability.hostDown(arr);
-
-        System.out.println("******---------******");
-        System.out.println("Available cluster details: ");
-        if (clusterAvailability.hostDetailsList.size() == 0) {
-            System.out.println("There is no clusters available");
-        } else {
-            clusterAvailability.hostDetailsList.forEach(System.out::println);
-        }*/
     }
 
     /**
@@ -111,20 +81,20 @@ public class ClusterHandler {
         logger.debug("hostDown execution started");
         if (hostName == null || hostName.length == 0) {
             logger.error("Please give valid host name of a cluster");
-            return null;
+            throw new IllegalArgumentException("Please give valid host name of a cluster");
         }
         try {
             lock.writeLock().lock();
             if (hostName.length > 2) {
                 logger.error("Max of 2 hosts can go down at a time.");
-                return Collections.emptyList();
+                throw new IllegalArgumentException("Max of 2 hosts can go down at a time.");
             }
             List<Result> results = new ArrayList<>();
             for (String host : hostName) {
                 HostDetails deletedCluster = removeCluster(host);
                 if (deletedCluster == null) {
                     logger.error("The given cluster doesn't exist");
-                    return null;
+                    throw new IllegalArgumentException("The given cluster doesn't exist");
                 }
                 assignFileToOtherClusters(results, deletedCluster);
             }
@@ -150,14 +120,21 @@ public class ClusterHandler {
         HashMap<String, String> values = deletedCluster.getValues();
 
         for (Map.Entry<String, String> map : values.entrySet()) {
-            HostDetails primaryHostDetail = priorityQueue.remove();
-            HostDetails backupHostDetail = priorityQueue.remove();
+
+            HostDetails primaryHostDetail = priorityQueue.size() > 0 ? priorityQueue.remove() : null;
+            if (primaryHostDetail == null) {
+                return;
+            }
+
+            HostDetails backupHostDetail = priorityQueue.size() > 0 ? priorityQueue.remove() : null;
             primaryHostDetail = map.getValue().equals(primaryHostDetail) ? backupHostDetail : primaryHostDetail;
             primaryHostDetail.getValues().put(map.getKey(), map.getValue());
             primaryHostDetail.setHostSize(primaryHostDetail.getHostSize() + 1);
             results.add(new Result(map.getKey(), map.getValue(), primaryHostDetail.getHostName()));
             priorityQueue.offer(primaryHostDetail);
-            priorityQueue.offer(backupHostDetail);
+            if (backupHostDetail != null) {
+                priorityQueue.offer(backupHostDetail);
+            }
         }
     }
 
@@ -173,18 +150,22 @@ public class ClusterHandler {
         logger.debug("removeCluster execution started");
 
         Integer index = mappingTable.get(hostName);
-        if (index == null) {
+        if (index == null || hostDetailsList.size() <= index) {
+            System.out.println("size" + hostDetailsList.size());
+            System.out.println("index" + index);
             return null;
         }
         HostDetails hostDetails = hostDetailsList.get(index);
 
-        int size = hostDetailsList.size();
-        HostDetails hostDetail = hostDetailsList.get(size - 1);
+        int hostDetailsSize = hostDetailsList.size();
+        HostDetails hostDetail = hostDetailsList.get(hostDetailsSize - 1);
 
-        if (size != 1) {
+        if (hostDetailsSize != 1) {
             hostDetailsList.set(index, hostDetail);
+            mappingTable.put(hostName, index);
         }
-        hostDetailsList.remove(size - 1);
+        hostDetailsList.remove(hostDetailsSize - 1);
+        mappingTable.remove(hostName);
 
         logger.debug("removeCluster execution ended");
         return hostDetails;
@@ -198,7 +179,6 @@ public class ClusterHandler {
         } finally {
             lock.readLock().unlock();
         }
-
     }
 
     /**

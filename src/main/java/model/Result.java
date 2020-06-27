@@ -1,7 +1,7 @@
 package model;
 
 /**
- *
+ * it contains the result after host down
  */
 public class Result {
     private String fileName;
